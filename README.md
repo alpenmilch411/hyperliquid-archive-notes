@@ -54,7 +54,7 @@ The archive gives you per-minute open interest, premium, mark, oracle and mid pr
 | 15 | **Funding is censored.** About half of all rows carry no information | The clamp does not bind, the premium cancels, and funding sits exactly on the interest rate |
 | 16 | A rolling z-score of funding is **`±inf` on real rows**, sign decided by rounding noise | Because of 15, the rolling standard deviation is exactly zero |
 | 17 | Before a coin dies, **funding goes to zero and stays there for years** | The volume field freezes, so the row still looks liquid |
-| 19 | A row stamped T is **one snapshot of the whole exchange, taken at T** to within about a second, every field at the same instant | Line it up against a live websocket and its values show up as late as 2.5 s after T. It looks like look-ahead. Most of it is the websocket's own delay |
+| 19 | A row stamped T is **one snapshot at T**, every field from the same instant | Against a live websocket its values arrive up to 2.5 s late. That is mostly delivery delay, not look-ahead |
 
 ### 1. The funding scale changed
 
@@ -256,35 +256,15 @@ Three coins out of 205 genuine listings. I have not found a rule in the public d
 
 `probes/late_listing_skip.py`
 
-### 19. What the time on a row means
+### 19. A row is one snapshot, taken at its timestamp
 
-Someone asked me this, and I did not know. A row stamped `14:57:00`: is it the market at 14:57:00, the minute averaged, or whenever the recorder got round to it? Can anything in it come from after 14:57:00? And are open interest and the mark price in the same row from the same moment?
+A row stamped `14:57:00` is not a minute average and not a loose recording time. It is one snapshot of the whole exchange, taken at T to within about a second, and every field in it is from the same instant.
 
-Short answer: it is a single snapshot, taken at T to within about a second, and every field in it is from the same instant. It is not an average and not a loose recording time.
+I lined 586 minutes of the archive up against a recording of the public websocket. For BTC, ETH and PAXG, 87% of rows match a single websocket push on all ten fields exactly. One moment fits all ten fields in 99.5% of rows, so joining open interest to the mark price from the same row is safe.
 
-To check, I recorded Hyperliquid's public websocket from a server in Frankfurt and lined the archive up against it. Two feeds: `activeAssetCtx` for BTC, ETH and PAXG, which pushes the same ten fields about once a second, and `allDexsAssetCtxs`, which pushes the whole universe about once every 15 seconds. The overlap with the archive is 586 minutes on 2026-09-26 and 2026-09-27. That is 1,758 rows at one-second resolution and 137,124 rows across all 234 main-dex coins at 15-second resolution.
+Against the websocket, values show up as late as 2.5 s after T. That looks like look-ahead, but most of it is the websocket's own delay (median 361 ms on `trades`). Take that off and only 1.3% of rows are provably after T. If you need a hard guarantee, treat a row stamped T as known at T+3 s.
 
-**It is one snapshot, not an aggregate.** For 87% of the BTC, ETH and PAXG rows, a single websocket push matches the row on all ten fields, exactly. An average would not do that. For the rest, the moment fell between two pushes.
-
-**It is taken at a fixed point, not whenever.** On my clock, a snapshot at T+0.4 s fits 98.4% of minutes, all three coins at once (550 minutes where all three could be placed). At T+1.5 s only 47% fit. At T+3 s, 8.5%. At T−1 s, 7.8%. Whatever writes the archive takes its picture at the same point in every minute. Across the whole universe the same offset holds, at the coarser resolution: T+0.7 s fits 95.6% of rows.
-
-**Every field is from the same instant.** Of the 1,729 rows where every field could be placed, one single moment fits all ten fields in 99.5%. The 9 rows where none does are spread over six different fields, open interest the most with 4. No field leads or lags the others. It also holds across coins: in 99.3% of minutes, one moment fits BTC, ETH and PAXG together. So it looks like one snapshot of the whole exchange per minute. Joining open interest to mark or oracle price from the same row is safe.
-
-**Can a value come from after T?** On my clock, yes. In 18% of rows the snapshot has to be after T, and single values first appeared on my feed up to 2.55 seconds after T.
-
-But my clock is not the exchange's. The websocket delivers late. `trades` frames carry the exchange's time, and they arrive 295 / 361 / 1,001 ms after it (1st, 50th, 99th percentile). The context frames carry no exchange time at all. Lining their mid price up against the `bbo` feed puts them at roughly 0.5 to 0.7 seconds late. That is a rougher estimate, so I would not lean on it.
-
-Take the median `trades` delay off and only 1.3% of rows are still provably after T. Take the 99th percentile off and it is 2 rows out of 1,720. The largest gap I can prove on my own clock is 1.04 seconds, before taking any delay off.
-
-So I think the snapshot is the exchange's state at T, give or take about half a second, and I cannot tell you which side of T it falls on. Any look-ahead is bounded, and it is about a second at most. If you need a hard guarantee, treat a row stamped T as known at T+3 s. That covers every value in my one-second sample, even on my late clock.
-
-A worked example. BTC, `2026-09-26T01:00:00Z`. The row has mark `83868`, oracle `83909.5`, funding `0.0000051465`, day volume `2876124270.08946`. The push that reached me at T+0.29 s had the row's day volume but the old prices, mark `83846.4` and oracle `83904.0`. The next push arrived at T+2.55 s, because one was missing in between. It had the row's prices, but the volume had already moved on. So the row is the state at one moment between those two pushes. "First seen at T+2.55 s" is where the prices showed up on my feed, not when the snapshot was taken.
-
-**Compare numbers, not text.** The two sources print the same number differently. The archive writes `84581` and `0`, the websocket writes `84581.0` and `0.0`. For `prev_day_px`, only 57% of matches are the same text. Parse both with `Decimal`, not `float`.
-
-Open interest and day volume are harder. They are running sums, and both sources print them with float noise, but not always the same noise. The websocket says `1106151.6259999992` where the archive says `1106151.626`. Of the matches, 4% for open interest and 41% for day volume only match within float noise, the largest gap 3.3e-14 of the value. An exact join on either of those two columns will quietly drop rows.
-
-Honest caveats. Every offset here is against the time frames reached my machine, not the exchange's time. That machine's clock was checked against NTP every five minutes and was within 30 ms, usually 5. The one-second timing only covers BTC, ETH and PAXG, and the universe-wide check only resolves to about 15 seconds. The archive has no HIP-3 rows, so this is main dex only. And it is only 586 minutes over two days: the bucket's files for 2026-09-26 and 2026-09-27 stop at 06:52 and 02:55, so those days are partial. If the writer changes, this changes with it.
+Compare numbers, not text: the archive writes `84581` where the websocket writes `84581.0`.
 
 `probes/row_timestamp_semantics.py`
 
@@ -333,10 +313,8 @@ python probes/zeros_not_nulls.py        --archive-dir ./data
 python probes/negative_open_interest.py --archive-dir ./data
 ```
 
-One probe needs a recording of the public websocket as well as the archive. Record, wait for that day to land in the bucket (it appears the next morning, UTC), download it, then compare:
-
 ```bash
-python probes/row_timestamp_semantics.py record  --minutes 120 --out rec.jsonl
+python probes/row_timestamp_semantics.py record  --minutes 120 --out rec.jsonl   # then, once that day is in the bucket:
 python probes/row_timestamp_semantics.py compare --archive-dir ./data --recording rec.jsonl
 ```
 
